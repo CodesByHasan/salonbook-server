@@ -12,6 +12,8 @@ import {
 } from "../../validators/appointment.js";
 
 // Mounted at /api/appointments
+// Status flow: pending -> confirmed (admin) -> paid (Stripe webhook)
+// Cancel: customer while pending, admin while pending/confirmed (not after payment).
 
 const router = Router();
 
@@ -22,11 +24,11 @@ const cancelUpdate = (cancelledBy) => ({
   $unset: { slotLocked: "" },
 });
 
-// After a failed conditional update, say WHY (not found vs wrong status).
-async function explainFailure(filter, wrongStatusMessage) {
+// After a failed conditional update, say WHY (not found vs wrong state).
+async function explainFailure(filter, wrongStateMessage) {
   const exists = await appointmentsCollection.findOne(filter, { projection: { _id: 1 } });
   if (!exists) throw new ApiError(404, "Appointment not found");
-  throw new ApiError(409, wrongStatusMessage);
+  throw new ApiError(409, wrongStateMessage);
 }
 
 // POST /api/appointments (customer)
@@ -53,11 +55,14 @@ router.post("/", verifyJWT, validate(createAppointmentSchema), async (req, res) 
     serviceName: service.name,
     servicePrice: service.price,
     serviceDuration: service.duration,
+    serviceImage: service.image,
+    serviceCategory: service.category,
     date,
     timeSlot,
     startsAt,
     notes: notes ?? "",
     status: "pending",
+    paymentStatus: "unpaid",
     slotLocked: true,
     createdAt: now,
     updatedAt: now,
@@ -128,17 +133,19 @@ router.patch("/admin/:id/confirm", verifyJWT, requireRole("admin"), async (req, 
   sendSuccess(res, updated, "Appointment confirmed");
 });
 
-// PATCH /api/appointments/admin/:id/cancel (admin): pending or confirmed.
+// PATCH /api/appointments/admin/:id/cancel (admin): pending or confirmed, never after payment.
 router.patch("/admin/:id/cancel", verifyJWT, requireRole("admin"), async (req, res) => {
   const filter = { _id: toObjectId(req.params.id, "Appointment not found") };
 
   const updated = await appointmentsCollection.findOneAndUpdate(
-    { ...filter, status: { $in: ["pending", "confirmed"] } },
+    { ...filter, status: { $in: ["pending", "confirmed"] }, paymentStatus: { $ne: "paid" } },
     cancelUpdate("admin"),
     { returnDocument: "after" },
   );
 
-  if (!updated) await explainFailure(filter, "This appointment is already cancelled");
+  if (!updated) {
+    await explainFailure(filter, "This appointment is already cancelled or has been paid");
+  }
 
   sendSuccess(res, updated, "Appointment cancelled");
 });
