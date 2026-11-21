@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { appointmentsCollection, servicesCollection } from "../../config/db.js";
+import { stripe } from "../../config/stripe.js";
 import { verifyJWT, requireRole } from "../../middleware/auth.js";
 import { validate } from "../../middleware/validate.js";
 import { sendSuccess } from "../../utils/apiResponse.js";
@@ -12,8 +13,6 @@ import {
 } from "../../validators/appointment.js";
 
 // Mounted at /api/appointments
-// Status flow: pending -> confirmed (admin) -> paid (Stripe webhook)
-// Cancel: customer while pending, admin while pending/confirmed (not after payment).
 
 const router = Router();
 
@@ -29,6 +28,16 @@ async function explainFailure(filter, wrongStateMessage) {
   const exists = await appointmentsCollection.findOne(filter, { projection: { _id: 1 } });
   if (!exists) throw new ApiError(404, "Appointment not found");
   throw new ApiError(409, wrongStateMessage);
+}
+
+// A cancelled appointment must not be payable through an old checkout link.
+async function expireCheckout(appointment) {
+  if (!appointment?.checkoutSessionId) return;
+  try {
+    await stripe.checkout.sessions.expire(appointment.checkoutSessionId);
+  } catch {
+    // Already expired or completed: nothing to do.
+  }
 }
 
 // POST /api/appointments (customer)
@@ -146,6 +155,8 @@ router.patch("/admin/:id/cancel", verifyJWT, requireRole("admin"), async (req, r
   if (!updated) {
     await explainFailure(filter, "This appointment is already cancelled or has been paid");
   }
+
+  await expireCheckout(updated);
 
   sendSuccess(res, updated, "Appointment cancelled");
 });

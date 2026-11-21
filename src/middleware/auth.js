@@ -1,11 +1,32 @@
-import { createRemoteJWKSet, jwtVerify } from "jose";
+import { createLocalJWKSet, jwtVerify } from "jose";
+import { auth } from "../config/auth.js";
 import { env } from "../config/env.js";
 import { usersCollection } from "../config/db.js";
 import { ApiError } from "../utils/ApiError.js";
 
-// Public keys of this server's Better Auth. jose caches them.
-const JWKS = createRemoteJWKSet(new URL(env.AUTH_JWKS_URL));
+// Signing keys come straight from this server's Better Auth (no HTTP call to ourselves).
+const KEY_TTL_MS = 5 * 60 * 1000;
+let keyCache = { keys: null, loadedAt: 0 };
 
+async function loadKeys(force = false) {
+  if (!force && keyCache.keys && Date.now() - keyCache.loadedAt < KEY_TTL_MS) return keyCache.keys;
+  const jwks = await auth.api.getJwks();
+  keyCache = { keys: createLocalJWKSet(jwks), loadedAt: Date.now() };
+  return keyCache.keys;
+}
+
+async function verifyToken(token) {
+  const options = { issuer: env.BETTER_AUTH_URL, audience: env.BETTER_AUTH_URL };
+  try {
+    return (await jwtVerify(token, await loadKeys(), options)).payload;
+  } catch (error) {
+    // Keys may have rotated: reload once and retry.
+    if (error?.code === "ERR_JWKS_NO_MATCHING_KEY") {
+      return (await jwtVerify(token, await loadKeys(true), options)).payload;
+    }
+    throw error;
+  }
+}
 
 export async function verifyJWT(req, res, next) {
   const [authType, token] = (req.headers.authorization ?? "").split(" ");
@@ -16,11 +37,11 @@ export async function verifyJWT(req, res, next) {
 
   let payload;
   try {
-    ({ payload } = await jwtVerify(token, JWKS, {
-      issuer: env.BETTER_AUTH_URL,
-      audience: env.BETTER_AUTH_URL,
-    }));
-  } catch {
+    payload = await verifyToken(token);
+  } catch (error) {
+    if (env.NODE_ENV !== "production") {
+      console.error(`[auth] JWT rejected: ${error?.code ?? error?.name}: ${error?.message}`);
+    }
     throw new ApiError(401, "Unauthorized: Invalid or expired token");
   }
 

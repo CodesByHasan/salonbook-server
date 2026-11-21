@@ -11,7 +11,7 @@ const required = [
   "STRIPE_SECRET_KEY",
   "STRIPE_WEBHOOK_SECRET",
   // On Vercel these must be set explicitly (no localhost fallbacks).
-  ...(isProduction ? ["CLIENT_URL", "BETTER_AUTH_URL", "AUTH_JWKS_URL"] : []),
+  ...(isProduction ? ["CLIENT_URL", "BETTER_AUTH_URL"] : []),
 ];
 
 const missing = required.filter((key) => !process.env[key]);

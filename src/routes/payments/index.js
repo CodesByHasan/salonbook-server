@@ -12,6 +12,7 @@ import {
   sessionStatusQuerySchema,
   transactionsQuerySchema,
 } from "../../validators/payment.js";
+import { fulfillCheckoutSession } from "./fulfill.js";
 
 // Mounted at /api/payments
 
@@ -44,10 +45,18 @@ router.post("/create-checkout-session", verifyJWT, validate(createCheckoutSessio
   if (appointment.checkoutSessionId) {
     try {
       const existing = await stripe.checkout.sessions.retrieve(appointment.checkoutSessionId);
+
+      // Already paid on Stripe but not saved yet: save it instead of charging twice.
+      if (existing.payment_status === "paid") {
+        await fulfillCheckoutSession(existing);
+        throw new ApiError(409, "This appointment is already paid");
+      }
+
       if (existing.status === "open" && existing.url) {
         return sendSuccess(res, { url: existing.url }, "Checkout session ready");
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
       // Could not reuse it: create a new one below.
     }
   }
@@ -110,10 +119,20 @@ router.get("/session-status", verifyJWT, validate(sessionStatusQuerySchema, "que
     throw new ApiError(403, "Forbidden: this payment belongs to another account");
   }
 
-  // "recorded" = the webhook has already saved the payment and marked the appointment paid.
-  const recorded = Boolean(
+  // "recorded" = the payment is saved and the appointment is marked paid.
+  let recorded = Boolean(
     await paymentsCollection.findOne({ stripeSessionId: session.id }, { projection: { _id: 1 } }),
   );
+
+  // Stripe confirmed the payment (retrieved server-side with our secret key) but the webhook
+  // has not saved it yet (e.g. local dev without `stripe listen`): save it now.
+  if (!recorded && session.payment_status === "paid") {
+    try {
+      recorded = await fulfillCheckoutSession(session);
+    } catch (error) {
+      console.error("Could not record payment from session-status:", error);
+    }
+  }
 
   sendSuccess(
     res,
