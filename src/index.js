@@ -1,50 +1,32 @@
-import express from "express";
-import cors from "cors";
-import "dotenv/config";
-import { connectToMongoDB } from "./config/db.js";
+import { env } from "./config/env.js";
+import { connectDB, closeDB } from "./config/db.js";
+import app from "./app.js";
 
-const app = express();
-const port = process.env.PORT || 8000;
+// Local entry point: connect to MongoDB first, then start the HTTP server.
+let server;
 
-// middleware
-app.use(express.json());
-app.use(cors());
+async function start() {
+  try {
+    await connectDB();
+    console.log("Connected to MongoDB");
 
-// database connection
-const connectedClient = await connectToMongoDB();
+    server = app.listen(env.PORT, () => {
+      console.log(`Server running on http://localhost:${env.PORT}`);
+    });
+  } catch (err) {
+    console.error("Failed to start server:", err.message);
+    process.exit(1);
+  }
+}
 
-const database = connectedClient.db(process.env.DB_NAME || "salonbook");
+// Stop accepting requests and close the database when the process is stopped.
+async function shutdown() {
+  server?.close();
+  await closeDB();
+  process.exit(0);
+}
 
-// collections
-const users = database.collection("users");
-const services = database.collection("services");
-const bookings = database.collection("bookings");
-const payments = database.collection("payments");
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
 
-// home route
-app.get("/", (req, res) => {
-  res.send("SalonBook server is running!");
-});
-
-// get all users
-app.get("/users", async (req, res) => {
-  const result = await users.find({}).toArray();
-  res.send(result);
-});
-
-// get all services
-app.get("/services", async (req, res) => {
-  const result = await services.find({}).toArray();
-  res.send(result);
-});
-
-// get all bookings
-app.get("/bookings", async (req, res) => {
-  const result = await bookings.find({}).toArray();
-  res.send(result);
-});
-
-// start server
-app.listen(port, () => {
-  console.log(`SalonBook server is running on port ${port}`);
-});
+start();
