@@ -1,13 +1,22 @@
 import { Router } from "express";
-import authRouter from "./auth/index.js";
+import { sendSuccess } from "../utils/apiResponse.js";
+import usersRouter from "./users/index.js";
+import servicesRouter from "./services/index.js";
+import appointmentsRouter from "./appointments/index.js";
+import uploadRouter from "./upload/index.js";
+
+// All API routes live under /api (see app.js). /api/auth/* is handled by Better Auth first.
 
 const router = Router();
 
-router.use("/auth", authRouter);
+// GET /api/health: quick check that the server is up.
+router.get("/health", (req, res) => {
+  sendSuccess(res, { status: "ok" }, "API is running");
+});
 
-// Keep your existing route mounts here:
-// router.use("/users", usersRouter);
-// router.use("/services", servicesRouter);
-// router.use("/bookings", bookingsRouter);
+router.use("/users", usersRouter);
+router.use("/services", servicesRouter);
+router.use("/appointments", appointmentsRouter);
+router.use("/upload", uploadRouter);
 
 export default router;
