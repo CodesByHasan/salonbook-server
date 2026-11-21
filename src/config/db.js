@@ -15,7 +15,14 @@ export async function connectDB() {
 export const usersCollection = db.collection("user");
 export const servicesCollection = db.collection("services");
 export const appointmentsCollection = db.collection("appointments");
+export const paymentsCollection = db.collection("payments");
 
 export async function closeDB() {
   await client.close();
 }
+
+
+
+
+
+
