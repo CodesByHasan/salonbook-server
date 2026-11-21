@@ -1,64 +1,55 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
+import { env } from "../config/env.js";
+import { usersCollection } from "../config/db.js";
 import { ApiError } from "../utils/ApiError.js";
 
-const AUTH_URL = process.env.CLIENT_URL || "http://localhost:3000";
+// Public keys of this server's Better Auth. jose caches them.
+const JWKS = createRemoteJWKSet(new URL(env.AUTH_JWKS_URL));
 
-const JWKS = createRemoteJWKSet(
-  new URL(`${AUTH_URL}/api/auth/jwks`)
-);
 
-// Verify the JWT sent by the frontend.
 export async function verifyJWT(req, res, next) {
-  try {
-    const authorization = req.headers.authorization;
+  const [authType, token] = (req.headers.authorization ?? "").split(" ");
 
-    if (!authorization || !authorization.startsWith("Bearer ")) {
-      throw new ApiError(401, "Unauthorized: Token is required");
-    }
-
-    const token = authorization.split(" ")[1];
-
-    if (!token) {
-      throw new ApiError(401, "Unauthorized: Token is required");
-    }
-
-    const { payload } = await jwtVerify(token, JWKS, {
-      issuer: AUTH_URL,
-      audience: AUTH_URL,
-    });
-
-    req.user = {
-      id: payload.sub || payload.id,
-      name: payload.name,
-      email: payload.email,
-      role: payload.role || "user",
-    };
-
-    if (!req.user.id || !req.user.email) {
-      throw new ApiError(401, "Invalid authentication token");
-    }
-
-    next();
-  } catch (error) {
-    if (error instanceof ApiError) {
-      return next(error);
-    }
-
-    next(new ApiError(401, "Unauthorized: Invalid or expired token"));
+  if (authType !== "Bearer" || !token) {
+    throw new ApiError(401, "Unauthorized: Token is required");
   }
+
+  let payload;
+  try {
+    ({ payload } = await jwtVerify(token, JWKS, {
+      issuer: env.BETTER_AUTH_URL,
+      audience: env.BETTER_AUTH_URL,
+    }));
+  } catch {
+    throw new ApiError(401, "Unauthorized: Invalid or expired token");
+  }
+
+  const user = await usersCollection.findOne(
+    { email: payload.email },
+    { projection: { name: 1, email: 1, role: 1, isBlocked: 1 } },
+  );
+
+  if (!user) throw new ApiError(401, "Unauthorized: User no longer exists");
+  if (user.isBlocked) throw new ApiError(403, "Your account has been blocked. Contact support.");
+
+  req.user = {
+    id: String(user._id),
+    name: user.name,
+    email: user.email,
+    role: user.role ?? "user",
+  };
+
+  next();
 }
 
-// Check whether the authenticated user has an allowed role.
+// Allows only the listed roles. Use after verifyJWT.
+// Example: router.get("/", verifyJWT, requireRole("admin"), handler)
 export function requireRole(...allowedRoles) {
   return (req, res, next) => {
-    if (!req.user) {
-      return next(new ApiError(401, "Unauthorized"));
-    }
+    if (!req.user) throw new ApiError(401, "Unauthorized");
 
     if (!allowedRoles.includes(req.user.role)) {
-      return next(
-        new ApiError(403, "Forbidden: You do not have permission")
-      );
+      throw new ApiError(403, "Forbidden: You do not have permission");
     }
 
     next();
