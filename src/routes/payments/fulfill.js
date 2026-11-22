@@ -1,8 +1,9 @@
+// Saves the transaction and marks the appointment as paid.
+// Called ONLY by the verified Stripe webhook (webhook.js) and the recover script.
+// Safe to run many times for the same session.
+
 import { ObjectId } from "mongodb";
 import { appointmentsCollection, transactionsCollection } from "../../config/db.js";
-
-// Saves the transaction and marks the appointment as paid.
-// Called by the Stripe webhook AND by GET /api/payments/session-status, so a payment is saved
 
 
 export async function fulfillCheckoutSession(session) {
