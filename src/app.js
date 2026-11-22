@@ -14,10 +14,6 @@ import { stripeWebhook } from "./routes/payments/webhook.js";
 import { notFound } from "./middleware/notFound.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 
-// Builds the Express app.
-// The server starts in src/index.js.
-// Vercel uses api/index.js.
-
 const app = express();
 
 app.set("trust proxy", 1);
@@ -35,28 +31,28 @@ if (env.NODE_ENV !== "production") {
   app.use(morgan("dev"));
 }
 
-// Better Auth endpoints.
+// Better Auth.
 app.all("/api/auth/*splat", toNodeHandler(auth));
 
-// Stripe webhook must receive the raw request body.
+// Stripe webhook MUST be registered before express.json().
 app.post(
   "/api/webhooks/stripe",
   express.raw({ type: "application/json" }),
   stripeWebhook
 );
 
-// Parse JSON for normal API requests.
+// Normal API JSON requests.
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/", (req, res) => {
   res.send("SalonBook server is running!");
 });
 
-// All application API routes.
+// All application routes.
 app.use("/api", routes);
 
-// Must be placed after all routes.
 app.use(notFound);
 app.use(errorHandler);
 
 export default app;
+

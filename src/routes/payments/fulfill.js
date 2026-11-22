@@ -4,75 +4,127 @@ import {
   transactionsCollection,
 } from "../../config/db.js";
 
-// This function must only be called after Stripe webhook signature verification.
-// It is safe for Stripe to deliver the same event more than once.
+// Called only after Stripe webhook signature verification.
 export async function fulfillCheckoutSession(session) {
-  if (session.payment_status !== "paid") return false;
+  if (session.payment_status !== "paid") {
+    return false;
+  }
 
-  const { appointmentId } = session.metadata ?? {};
+  const { appointmentId, userId } = session.metadata || {};
 
   if (!appointmentId || !ObjectId.isValid(appointmentId)) {
-    console.warn("Stripe fulfill: invalid appointmentId", session.id);
-    return false;
+    throw new Error("Invalid appointment ID in Stripe metadata");
+  }
+
+  if (!userId) {
+    throw new Error("Customer ID missing from Stripe metadata");
+  }
+
+  if (session.client_reference_id &&
+      session.client_reference_id !== appointmentId) {
+    throw new Error("Stripe appointment reference mismatch");
   }
 
   const _id = new ObjectId(appointmentId);
 
-  const appointment = await appointmentsCollection.findOne({ _id });
+  // Find the correct customer's appointment.
+  const appointment = await appointmentsCollection.findOne({
+    _id,
+    userId,
+  });
 
   if (!appointment) {
-    console.warn("Stripe fulfill: appointment not found", appointmentId);
-    return false;
+    throw new Error("Appointment not found for this Stripe session");
   }
 
-  // Make sure the Stripe session belongs to this appointment.
-  if (appointment.checkoutSessionId !== session.id) {
-    console.warn("Stripe fulfill: session does not match appointment", session.id);
-    return false;
+  // Do not allow another Checkout Session to pay this appointment.
+  if (
+    appointment.checkoutSessionId &&
+    appointment.checkoutSessionId !== session.id
+  ) {
+    throw new Error("Stripe Checkout Session does not match appointment");
   }
 
   const now = new Date();
 
-  // Save one transaction per Stripe Checkout Session.
-  await transactionsCollection.updateOne(
-    { stripeSessionId: session.id },
-    {
-      $setOnInsert: {
-        paymentIntentId: session.payment_intent ?? null,
-        stripeSessionId: session.id,
-        appointmentId: _id,
-        userId: appointment.userId,
-        customerName: appointment.userName,
-        customerEmail: appointment.userEmail,
-        serviceId: appointment.serviceId,
-        serviceName: appointment.serviceName,
-        appointmentDate: appointment.date,
-        appointmentTime: appointment.timeSlot,
-        amount: (session.amount_total ?? 0) / 100,
-        currency: session.currency,
-        amountBdt: appointment.servicePrice,
-        status: "paid",
-        createdAt: now,
-      },
-    },
-    { upsert: true },
-  );
-
-  // Only the verified webhook can change this field to "paid".
-  await appointmentsCollection.updateOne(
+  // Update appointment payment status.
+  const appointmentResult = await appointmentsCollection.updateOne(
     {
       _id,
-      checkoutSessionId: session.id,
-      paymentStatus: { $ne: "paid" },
+      userId,
+      $or: [
+        { checkoutSessionId: session.id },
+        { checkoutSessionId: { $exists: false } },
+        { checkoutSessionId: null },
+      ],
     },
     {
       $set: {
         paymentStatus: "paid",
-        paidAt: now,
+        checkoutSessionId: session.id,
+        stripeSessionId: session.id,
+        paidAt: appointment.paidAt || now,
         updatedAt: now,
       },
-    },
+    }
   );
+
+  if (appointmentResult.matchedCount === 0) {
+    // Allow an already completed duplicate webhook.
+    const existing = await appointmentsCollection.findOne({
+      _id,
+      userId,
+      paymentStatus: "paid",
+      stripeSessionId: session.id,
+    });
+
+    if (!existing) {
+      throw new Error("MongoDB could not update appointment payment status");
+    }
+  }
+
+  // Save one transaction per Stripe Checkout Session.
+  try {
+    await transactionsCollection.updateOne(
+      { stripeSessionId: session.id },
+      {
+        $setOnInsert: {
+          stripeSessionId: session.id,
+          paymentIntentId: session.payment_intent || null,
+
+          appointmentId: _id,
+          userId,
+
+          customerName: appointment.userName || "",
+          customerEmail: appointment.userEmail || session.customer_details?.email || "",
+
+          serviceId: appointment.serviceId,
+          serviceName: appointment.serviceName,
+
+          appointmentDate: appointment.date,
+          appointmentTime: appointment.timeSlot,
+
+          amount: (session.amount_total || 0) / 100,
+          currency: session.currency || "usd",
+          amountBdt: appointment.servicePrice,
+
+          status: "paid",
+          createdAt: now,
+        },
+      },
+      { upsert: true }
+    );
+  } catch (error) {
+    // A duplicate-key error means another webhook already inserted it.
+    if (error.code !== 11000) {
+      throw error;
+    }
+  }
+
+  console.log("Payment successfully fulfilled:", {
+    appointmentId,
+    sessionId: session.id,
+  });
 
   return true;
 }

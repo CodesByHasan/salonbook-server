@@ -2,35 +2,63 @@ import { env } from "../../config/env.js";
 import { stripe } from "../../config/stripe.js";
 import { fulfillCheckoutSession } from "./fulfill.js";
 
-// POST /api/webhooks/stripe (mounted in app.js with express.raw)
+// POST /api/webhooks/stripe
 export async function stripeWebhook(req, res) {
   let event;
+
+  // Step 1: Verify Stripe signature.
   try {
     event = stripe.webhooks.constructEvent(
       req.body,
       req.headers["stripe-signature"],
-      env.STRIPE_WEBHOOK_SECRET,
+      env.STRIPE_WEBHOOK_SECRET
     );
   } catch (error) {
-    console.error("Stripe webhook verification failed:", error.message);
-    return res.status(400).send(`Webhook Error: ${error.message}`);
+    console.error("Stripe signature verification failed:", error.message);
+
+    return res.status(400).json({
+      success: false,
+      message: "Invalid Stripe webhook signature",
+    });
   }
 
+  console.log("Stripe event received:", event.type);
+
+  // Step 2: Process successful payments.
   try {
     switch (event.type) {
       case "checkout.session.completed":
-      case "checkout.session.async_payment_succeeded":
-        await fulfillCheckoutSession(event.data.object);
-        break;
-      default:
-        break;
-    }
-  } catch (error) {
-    // 500 makes Stripe retry the event later.
-    console.error("Stripe webhook handling failed:", error);
-    return res.status(500).json({ received: false });
-  }
+      case "checkout.session.async_payment_succeeded": {
+        const session = event.data.object;
 
-  // Acknowledge receipt.
-  res.json({ received: true });
+        if (session.payment_status === "paid") {
+          const result = await fulfillCheckoutSession(session);
+
+          if (!result) {
+            throw new Error("Payment fulfillment was not completed");
+          }
+        }
+
+        break;
+      }
+
+      default:
+        console.log("Stripe event ignored:", event.type);
+    }
+
+    // Step 3: Acknowledge only after successful processing.
+    return res.status(200).json({
+      success: true,
+      received: true,
+    });
+  } catch (error) {
+    console.error("Stripe webhook fulfillment failed:", error);
+
+    // Stripe retries failed webhook deliveries.
+    return res.status(500).json({
+      success: false,
+      received: false,
+      message: "Payment fulfillment failed",
+    });
+  }
 }
