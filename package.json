@@ -9,7 +9,8 @@
     "start": "node src/index.js",
     "test": "node --test",
     "seed:admin": "node scripts/seed-admin.js",
-    "seed:services": "node scripts/seed-services.js"
+    "seed:services": "node scripts/seed-services.js",
+    "recover:payment": "node scripts/recover-payment.js"
   },
   "dependencies": {
     "@better-auth/mongo-adapter": "^1.7.27",
