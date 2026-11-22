@@ -1,10 +1,10 @@
 export function errorHandler(err, req, res, next) {
-  // If a response was already started, let Express close the connection.
+  // If a response was already started, let Express handle it.
   if (res.headersSent) {
     return next(err);
   }
 
-  // Bad JSON in the request body (thrown by express.json()).
+  // Invalid JSON request body.
   if (err.type === "entity.parse.failed") {
     return res.status(400).json({
       success: false,
@@ -12,7 +12,7 @@ export function errorHandler(err, req, res, next) {
     });
   }
 
-  // Upload problems (multer).
+  // Multer upload errors.
   if (err.name === "MulterError") {
     const tooBig = err.code === "LIMIT_FILE_SIZE";
 
@@ -26,8 +26,8 @@ export function errorHandler(err, req, res, next) {
 
   const statusCode = err.statusCode || err.status || 500;
 
+  // Do not expose internal server errors to users.
   if (statusCode >= 500) {
-    // Log the full error for the developer, but never send internal details to the client.
     console.error(err);
 
     return res.status(500).json({
@@ -42,3 +42,4 @@ export function errorHandler(err, req, res, next) {
     ...(err.details && { errors: err.details }),
   });
 }
+

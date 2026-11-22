@@ -1,19 +1,16 @@
 {
   "name": "salonbook-server",
   "version": "1.0.0",
-  "description": "",
+  "description": "SalonBook appointment booking platform API",
   "main": "src/index.js",
   "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "nodemon src/index.js",
     "start": "node src/index.js",
+    "test": "node --test",
     "seed:admin": "node scripts/seed-admin.js",
     "seed:services": "node scripts/seed-services.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
     "@better-auth/mongo-adapter": "^1.7.27",
     "better-auth": "^1.7.27",
@@ -34,3 +31,4 @@
     "nodemon": "^3.1.14"
   }
 }
+
