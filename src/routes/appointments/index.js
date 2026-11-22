@@ -11,6 +11,7 @@ import {
   myAppointmentsQuerySchema,
   adminAppointmentsQuerySchema,
 } from "../../validators/appointment.js";
+import { fulfillCheckoutSession } from "../payments/fulfill.js";
 
 // Mounted at /api/appointments
 
@@ -38,6 +39,29 @@ async function expireCheckout(appointment) {
   } catch {
     // Already expired or completed: nothing to do.
   }
+}
+
+// A confirmed, unpaid appointment with a checkout session may already be paid at Stripe.
+// Ask Stripe and save it with the same safe function the webhook uses, so the list
+// always shows the real payment status (no script, no reload, no waiting for the webhook).
+async function syncPaidAppointments(appointments) {
+  const waiting = appointments.filter(
+    (item) => item.status === "confirmed" && item.paymentStatus !== "paid" && item.checkoutSessionId,
+  );
+
+  await Promise.all(
+    waiting.map(async (item) => {
+      try {
+        const session = await stripe.checkout.sessions.retrieve(item.checkoutSessionId);
+        if (session.payment_status !== "paid") return;
+
+        if (await fulfillCheckoutSession(session)) item.paymentStatus = "paid";
+      } catch (error) {
+        // The list must still load if Stripe is slow. The next refresh tries again.
+        console.log("Stripe: could not check payment for", String(item._id), error.message);
+      }
+    }),
+  );
 }
 
 // POST /api/appointments (customer)
@@ -95,6 +119,8 @@ router.get("/my", verifyJWT, validate(myAppointmentsQuerySchema, "query"), async
   const filter = { userId: req.user.id, ...(status && { status }) };
 
   const items = await appointmentsCollection.find(filter).sort({ startsAt: -1 }).toArray();
+  await syncPaidAppointments(items);
+
   sendSuccess(res, items, "Appointments fetched successfully");
 });
 
@@ -107,6 +133,7 @@ router.get("/admin", verifyJWT, requireRole("admin"), validate(adminAppointments
     appointmentsCollection.find(filter).sort({ startsAt: -1 }).skip(getSkip(page, limit)).limit(limit).toArray(),
     appointmentsCollection.countDocuments(filter),
   ]);
+  await syncPaidAppointments(items);
 
   sendSuccess(res, items, "Appointments fetched successfully", 200, buildMeta(page, limit, total));
 });
