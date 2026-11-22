@@ -12,9 +12,13 @@ import {
   sessionStatusQuerySchema,
   transactionsQuerySchema,
 } from "../../validators/payment.js";
+import { fulfillCheckoutSession } from "./fulfill.js";
 
 // Mounted at /api/payments
-// Payments are saved ONLY by the verified Stripe webhook (see webhook.js). Nothing here writes a payment.
+// A payment is saved in two safe ways, both through fulfillCheckoutSession (see fulfill.js):
+//   1. The verified Stripe webhook (see webhook.js).
+//   2. GET /session-status below, only after Stripe itself says the session is paid.
+// fulfillCheckoutSession saves each session only once, so running both is fine.
 
 const router = Router();
 
@@ -34,9 +38,10 @@ router.post("/create-checkout-session", verifyJWT, validate(createCheckoutSessio
   if (appointment.checkoutSessionId) {
     const old = await stripe.checkout.sessions.retrieve(appointment.checkoutSessionId).catch(() => null);
 
-    // Paid at Stripe, waiting for the webhook: never charge twice.
+    // Paid at Stripe but not saved yet: save it now, so the customer is never charged twice.
     if (old?.payment_status === "paid") {
-      throw new ApiError(409, "Your payment was received. The appointment updates as soon as Stripe confirms it.");
+      await fulfillCheckoutSession(old);
+      throw new ApiError(409, "Your payment was received. This appointment is now marked as paid.");
     }
 
     if (old?.status === "open" && old.url) {
@@ -64,7 +69,7 @@ router.post("/create-checkout-session", verifyJWT, validate(createCheckoutSessio
         },
       },
     ],
-    // The webhook reads these to find the appointment.
+    // fulfillCheckoutSession reads these to find the appointment.
     metadata: { appointmentId, userId: req.user.id },
     success_url: `${env.CLIENT_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${env.CLIENT_URL}/payment/cancel?appointment_id=${appointmentId}`,
@@ -79,15 +84,23 @@ router.post("/create-checkout-session", verifyJWT, validate(createCheckoutSessio
 });
 
 // GET /api/payments/session-status?session_id=cs_test_... (owner or admin)
-// Read-only. The /payment/success page polls this while it waits for the webhook.
+// The /payment/success page polls this. If Stripe says the session is paid,
+// the payment is saved right here, so nothing depends on the webhook arriving first.
 router.get("/session-status", verifyJWT, validate(sessionStatusQuerySchema, "query"), async (req, res) => {
+
   const session = await stripe.checkout.sessions.retrieve(req.valid.query.session_id).catch(() => null);
   if (!session) throw new ApiError(404, "Payment session not found");
 
   const { appointmentId, userId } = session.metadata ?? {};
 
+  
   if (userId !== req.user.id && req.user.role !== "admin") {
     throw new ApiError(403, "Forbidden: this payment belongs to another account");
+  }
+
+  
+  if (session.payment_status === "paid") {
+    await fulfillCheckoutSession(session);
   }
 
   const [transaction, appointment] = await Promise.all([
@@ -105,8 +118,8 @@ router.get("/session-status", verifyJWT, validate(sessionStatusQuerySchema, "que
       appointmentId: appointmentId ?? null,
       amount: (session.amount_total ?? 0) / 100,
       currency: session.currency,
-      recorded: Boolean(transaction), // the webhook saved the transaction
-      appointmentPaymentStatus: appointment?.paymentStatus ?? "unpaid", // and marked the appointment paid
+      recorded: Boolean(transaction), // the transaction is saved
+      appointmentPaymentStatus: appointment?.paymentStatus ?? "unpaid", // and the appointment is marked paid
     },
     "Session status fetched",
   );
