@@ -1,6 +1,6 @@
 import { stripe } from "../src/config/stripe.js";
 import { connectDB, closeDB } from "../src/config/db.js";
-import { markAsPaid } from "../src/routes/payments/webhook.js";
+import { fulfillCheckoutSession } from "../src/routes/payments/fulfill.js";
 
 // Usage: npm run recover:payment -- cs_test_xxxxxxxx
 const sessionId = process.argv[2];
@@ -14,11 +14,9 @@ try {
   await connectDB();
 
   const session = await stripe.checkout.sessions.retrieve(sessionId);
-  if (session.payment_status !== "paid") {
-    throw new Error(`This session is not paid (status: ${session.payment_status}).`);
-  }
+  const saved = await fulfillCheckoutSession(session);
 
-  await markAsPaid(session);
+  if (!saved) throw new Error(`Nothing saved (payment status: ${session.payment_status}).`);
   console.log("Done: transaction saved and appointment marked as paid.");
 } catch (error) {
   console.error("Recovery failed:", error.message);

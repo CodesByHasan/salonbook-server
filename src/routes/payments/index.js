@@ -12,6 +12,7 @@ import {
   sessionStatusQuerySchema,
   transactionsQuerySchema,
 } from "../../validators/payment.js";
+import { fulfillCheckoutSession } from "./fulfill.js";
 
 // Mounted at /api/payments
 
@@ -23,25 +24,26 @@ router.post("/create-checkout-session", verifyJWT, validate(createCheckoutSessio
   const { appointmentId } = req.valid.body;
   const _id = toObjectId(appointmentId, "Appointment not found");
 
-
   const appointment = await appointmentsCollection.findOne({ _id, userId: req.user.id });
 
   if (!appointment) throw new ApiError(404, "Appointment not found");
   if (appointment.status !== "confirmed") throw new ApiError(409, "Only confirmed appointments can be paid");
   if (appointment.paymentStatus === "paid") throw new ApiError(409, "This appointment is already paid");
 
- 
+  // Reuse the open checkout page instead of creating a second one.
   if (appointment.checkoutSessionId) {
     const old = await stripe.checkout.sessions.retrieve(appointment.checkoutSessionId).catch(() => null);
 
+    // Already paid at Stripe (the webhook was late): save it now, never charge twice.
     if (old?.payment_status === "paid") {
-      throw new ApiError(409, "Your payment was received. The appointment updates as soon as Stripe confirms it.");
+      await fulfillCheckoutSession(old);
+      throw new ApiError(409, "This appointment is already paid");
     }
+
     if (old?.status === "open" && old.url) {
       return sendSuccess(res, { url: old.url }, "Checkout session ready");
     }
   }
-
 
   const unitAmount = Math.round(appointment.servicePrice * env.BDT_TO_USD_RATE * 100);
   if (unitAmount < 50) throw new ApiError(400, "This amount is below the minimum card payment");
@@ -63,7 +65,7 @@ router.post("/create-checkout-session", verifyJWT, validate(createCheckoutSessio
         },
       },
     ],
-    // The webhook reads these to find the appointment.
+    // fulfillCheckoutSession reads these to find the appointment.
     metadata: { appointmentId, userId: req.user.id },
     success_url: `${env.CLIENT_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${env.CLIENT_URL}/payment/cancel?appointment_id=${appointmentId}`,
@@ -78,7 +80,8 @@ router.post("/create-checkout-session", verifyJWT, validate(createCheckoutSessio
 });
 
 // GET /api/payments/session-status?session_id=cs_test_... (owner or admin)
-// Read-only. Used by the /payment/success page to wait for the webhook.
+// Used by the /payment/success page. Stripe is the source of truth: if Stripe says the session
+// is paid, the payment is saved right here, so the customer never waits for the webhook.
 router.get("/session-status", verifyJWT, validate(sessionStatusQuerySchema, "query"), async (req, res) => {
   const session = await stripe.checkout.sessions.retrieve(req.valid.query.session_id).catch(() => null);
   if (!session) throw new ApiError(404, "Payment session not found");
@@ -88,6 +91,9 @@ router.get("/session-status", verifyJWT, validate(sessionStatusQuerySchema, "que
   if (userId !== req.user.id && req.user.role !== "admin") {
     throw new ApiError(403, "Forbidden: this payment belongs to another account");
   }
+
+  // Safe to repeat: nothing is saved twice.
+  if (session.payment_status === "paid") await fulfillCheckoutSession(session);
 
   const [transaction, appointment] = await Promise.all([
     transactionsCollection.findOne({ stripeSessionId: session.id }, { projection: { _id: 1 } }),
@@ -104,8 +110,8 @@ router.get("/session-status", verifyJWT, validate(sessionStatusQuerySchema, "que
       appointmentId: appointmentId ?? null,
       amount: (session.amount_total ?? 0) / 100,
       currency: session.currency,
-      recorded: Boolean(transaction), // the webhook saved the transaction
-      appointmentPaymentStatus: appointment?.paymentStatus ?? "unpaid", // and marked the appointment paid
+      recorded: Boolean(transaction), // the transaction is saved
+      appointmentPaymentStatus: appointment?.paymentStatus ?? "unpaid", // and the appointment is marked paid
     },
     "Session status fetched",
   );
