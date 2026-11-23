@@ -2,7 +2,7 @@ import { z } from "zod";
 import { imageUrl, paginationShape } from "./common.js";
 
 const fields = {
-  name: z.string().trim().min(2).max(100),
+  serviceName: z.string().trim().min(2).max(100),
   description: z.string().trim().min(10).max(1000),
   category: z.string().trim().toLowerCase().min(2).max(50),
   price: z.number().positive("Price must be greater than 0"),

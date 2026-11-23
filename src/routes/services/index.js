@@ -11,6 +11,9 @@ import { createServiceSchema, updateServiceSchema, serviceListQuerySchema } from
 
 const router = Router();
 
+// The current client still reads "name", so responses also carry it next to "serviceName".
+const withName = (service) => ({ ...service, name: service.serviceName });
+
 // Builds the Mongo filter / sort / paging from the validated query.
 async function findServices(query, { onlyActive }) {
   const { search, category, sort, status, page, limit } = query;
@@ -23,7 +26,7 @@ async function findServices(query, { onlyActive }) {
 
   if (search) {
     const regex = new RegExp(escapeRegex(search), "i"); // case-insensitive
-    filter.$or = [{ name: regex }, { description: regex }];
+    filter.$or = [{ serviceName: regex }, { description: regex }];
   }
 
   const sortBy = sort ? { price: sort === "asc" ? 1 : -1, _id: 1 } : { createdAt: -1 };
@@ -33,7 +36,7 @@ async function findServices(query, { onlyActive }) {
     servicesCollection.countDocuments(filter),
   ]);
 
-  return { items, meta: buildMeta(page, limit, total) };
+  return { items: items.map(withName), meta: buildMeta(page, limit, total) };
 }
 
 // GET /api/services (public): active services only.
@@ -56,7 +59,7 @@ router.get("/:id", async (req, res) => {
 
   if (!service) throw new ApiError(404, "Service not found");
 
-  sendSuccess(res, service, "Service fetched successfully");
+  sendSuccess(res, withName(service), "Service fetched successfully");
 });
 
 // POST /api/services (admin)
@@ -65,7 +68,7 @@ router.post("/", verifyJWT, requireRole("admin"), validate(createServiceSchema),
   const service = { ...req.valid.body, createdBy: req.user.email, createdAt: now, updatedAt: now };
 
   const result = await servicesCollection.insertOne(service);
-  sendSuccess(res, { ...service, _id: result.insertedId }, "Service added successfully", 201);
+  sendSuccess(res, withName({ ...service, _id: result.insertedId }), "Service added successfully", 201);
 });
 
 // PATCH /api/services/:id (admin): also used to set status active/inactive.
@@ -78,7 +81,7 @@ router.patch("/:id", verifyJWT, requireRole("admin"), validate(updateServiceSche
 
   if (!updated) throw new ApiError(404, "Service not found");
 
-  sendSuccess(res, updated, "Service updated successfully");
+  sendSuccess(res, withName(updated), "Service updated successfully");
 });
 
 // DELETE /api/services/:id (admin)

@@ -17,6 +17,13 @@ import { fulfillCheckoutSession } from "../payments/fulfill.js";
 
 const router = Router();
 
+// The current client still reads "date" and "notes", so responses also carry them
+const forClient = (appointment) => ({
+  ...appointment,
+  date: appointment.appointmentDate,
+  notes: appointment.message,
+});
+
 // Pending/confirmed appointments hold their slot (slotLocked: true).
 // Cancelling removes the flag so the slot can be booked again.
 const cancelUpdate = (cancelledBy) => ({
@@ -68,10 +75,10 @@ async function syncPaidAppointments(appointments) {
 router.post("/", verifyJWT, validate(createAppointmentSchema), async (req, res) => {
   if (req.user.role === "admin") throw new ApiError(403, "Admins cannot book appointments");
 
-  const { serviceId, date, timeSlot, notes } = req.valid.body;
+  const { serviceId, appointmentDate, timeSlot, message } = req.valid.body;
 
   // Past dates/times are blocked (Asia/Dhaka time).
-  const startsAt = dhakaDateTime(date, timeSlot);
+  const startsAt = dhakaDateTime(appointmentDate, timeSlot);
   if (startsAt <= new Date()) throw new ApiError(400, "You cannot book a past date or time");
 
   const service = await servicesCollection.findOne({ _id: toObjectId(serviceId, "Service not found") });
@@ -80,20 +87,20 @@ router.post("/", verifyJWT, validate(createAppointmentSchema), async (req, res) 
 
   const now = new Date();
   const appointment = {
-    userId: req.user.id,
+    customerId: req.user.id,
     userName: req.user.name,
     userEmail: req.user.email,
     serviceId: service._id,
     // Snapshot, so history stays correct if the service is edited later.
-    serviceName: service.name,
+    serviceName: service.serviceName,
     servicePrice: service.price,
     serviceDuration: service.duration,
     serviceImage: service.image,
     serviceCategory: service.category,
-    date,
+    appointmentDate,
     timeSlot,
     startsAt,
-    notes: notes ?? "",
+    message: message ?? "",
     status: "pending",
     paymentStatus: "unpaid",
     slotLocked: true,
@@ -103,7 +110,7 @@ router.post("/", verifyJWT, validate(createAppointmentSchema), async (req, res) 
 
   try {
     const result = await appointmentsCollection.insertOne(appointment);
-    sendSuccess(res, { ...appointment, _id: result.insertedId }, "Appointment requested successfully", 201);
+    sendSuccess(res, forClient({ ...appointment, _id: result.insertedId }), "Appointment requested successfully", 201);
   } catch (error) {
     // The unique slot index rejected it: someone already holds this slot.
     if (error?.code === 11000) {
@@ -116,18 +123,18 @@ router.post("/", verifyJWT, validate(createAppointmentSchema), async (req, res) 
 // GET /api/appointments/my (customer): own appointments, newest first.
 router.get("/my", verifyJWT, validate(myAppointmentsQuerySchema, "query"), async (req, res) => {
   const { status } = req.valid.query;
-  const filter = { userId: req.user.id, ...(status && { status }) };
+  const filter = { customerId: req.user.id, ...(status && { status }) };
 
   const items = await appointmentsCollection.find(filter).sort({ startsAt: -1 }).toArray();
   await syncPaidAppointments(items);
 
-  sendSuccess(res, items, "Appointments fetched successfully");
+  sendSuccess(res, items.map(forClient), "Appointments fetched successfully");
 });
 
 // GET /api/appointments/admin (admin): ?status=&date=&page=&limit=
 router.get("/admin", verifyJWT, requireRole("admin"), validate(adminAppointmentsQuerySchema, "query"), async (req, res) => {
   const { status, date, page, limit } = req.valid.query;
-  const filter = { ...(status && { status }), ...(date && { date }) };
+  const filter = { ...(status && { status }), ...(date && { appointmentDate: date }) };
 
   const [items, total] = await Promise.all([
     appointmentsCollection.find(filter).sort({ startsAt: -1 }).skip(getSkip(page, limit)).limit(limit).toArray(),
@@ -135,12 +142,12 @@ router.get("/admin", verifyJWT, requireRole("admin"), validate(adminAppointments
   ]);
   await syncPaidAppointments(items);
 
-  sendSuccess(res, items, "Appointments fetched successfully", 200, buildMeta(page, limit, total));
+  sendSuccess(res, items.map(forClient), "Appointments fetched successfully", 200, buildMeta(page, limit, total));
 });
 
 // PATCH /api/appointments/:id/cancel (customer): only own + pending.
 router.patch("/:id/cancel", verifyJWT, async (req, res) => {
-  const filter = { _id: toObjectId(req.params.id, "Appointment not found"), userId: req.user.id };
+  const filter = { _id: toObjectId(req.params.id, "Appointment not found"), customerId: req.user.id };
 
   // One atomic update: no race between "check status" and "cancel".
   const updated = await appointmentsCollection.findOneAndUpdate(
@@ -151,7 +158,7 @@ router.patch("/:id/cancel", verifyJWT, async (req, res) => {
 
   if (!updated) await explainFailure(filter, "Only pending appointments can be cancelled");
 
-  sendSuccess(res, updated, "Appointment cancelled");
+  sendSuccess(res, forClient(updated), "Appointment cancelled");
 });
 
 // PATCH /api/appointments/admin/:id/confirm (admin): only pending.
@@ -166,7 +173,7 @@ router.patch("/admin/:id/confirm", verifyJWT, requireRole("admin"), async (req, 
 
   if (!updated) await explainFailure(filter, "Only pending appointments can be confirmed");
 
-  sendSuccess(res, updated, "Appointment confirmed");
+  sendSuccess(res, forClient(updated), "Appointment confirmed");
 });
 
 // PATCH /api/appointments/admin/:id/cancel (admin): pending or confirmed, never after payment.
@@ -185,7 +192,7 @@ router.patch("/admin/:id/cancel", verifyJWT, requireRole("admin"), async (req, r
 
   await expireCheckout(updated);
 
-  sendSuccess(res, updated, "Appointment cancelled");
+  sendSuccess(res, forClient(updated), "Appointment cancelled");
 });
 
 export default router;

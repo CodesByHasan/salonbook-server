@@ -1,20 +1,12 @@
-
 import { Router } from "express";
-import {
-  appointmentsCollection,
-  transactionsCollection,
-} from "../../config/db.js";
+import { appointmentsCollection, transactionsCollection } from "../../config/db.js";
 import { env } from "../../config/env.js";
 import { stripe } from "../../config/stripe.js";
 import { verifyJWT, requireRole } from "../../middleware/auth.js";
 import { validate } from "../../middleware/validate.js";
 import { sendSuccess } from "../../utils/apiResponse.js";
 import { ApiError } from "../../utils/ApiError.js";
-import {
-  buildMeta,
-  getSkip,
-  toObjectId,
-} from "../../utils/helpers.js";
+import { buildMeta, getSkip, toObjectId } from "../../utils/helpers.js";
 import {
   createCheckoutSessionSchema,
   sessionStatusQuerySchema,
@@ -23,243 +15,128 @@ import {
 import { fulfillCheckoutSession } from "./fulfill.js";
 
 // Mounted at /api/payments
-// Payments are saved through fulfillCheckoutSession.
-// Both Stripe webhook and session-status can safely call it.
+// A payment is saved in two safe ways, both through fulfillCheckoutSession (see fulfill.js):
+//   1. The verified Stripe webhook (see webhook.js).
+//   2. GET /session-status below, only after Stripe itself says the session is paid.
+// fulfillCheckoutSession saves each session only once, so running both is fine.
 
 const router = Router();
 
-// POST /api/payments/create-checkout-session
-// Customer can pay only their own confirmed, unpaid appointment.
-router.post(
-  "/create-checkout-session",
-  verifyJWT,
-  validate(createCheckoutSessionSchema),
-  async (req, res) => {
-    const { appointmentId } = req.valid.body;
+// POST /api/payments/create-checkout-session (customer)
+// Only the customer's own, confirmed, unpaid appointment. The price comes from the database.
+router.post("/create-checkout-session", verifyJWT, validate(createCheckoutSessionSchema), async (req, res) => {
+  const { appointmentId } = req.valid.body;
+  const _id = toObjectId(appointmentId, "Appointment not found");
 
-    const _id = toObjectId(
-      appointmentId,
-      "Appointment not found"
-    );
+  const appointment = await appointmentsCollection.findOne({ _id, customerId: req.user.id });
 
-    const appointment = await appointmentsCollection.findOne({
-      _id,
-      userId: req.user.id,
-    });
+  if (!appointment) throw new ApiError(404, "Appointment not found");
+  if (appointment.status !== "confirmed") throw new ApiError(409, "Only confirmed appointments can be paid");
+  if (appointment.paymentStatus === "paid") throw new ApiError(409, "This appointment is already paid");
 
-    if (!appointment) {
-      throw new ApiError(404, "Appointment not found");
+  // Reuse the open checkout page instead of creating a second one.
+  if (appointment.checkoutSessionId) {
+    const old = await stripe.checkout.sessions.retrieve(appointment.checkoutSessionId).catch(() => null);
+
+    // Paid at Stripe but not saved yet: save it now, so the customer is never charged twice.
+    if (old?.payment_status === "paid") {
+      await fulfillCheckoutSession(old);
+      throw new ApiError(409, "Your payment was received. This appointment is now marked as paid.");
     }
 
-    if (appointment.status !== "confirmed") {
-      throw new ApiError(
-        409,
-        "Only confirmed appointments can be paid"
-      );
+    if (old?.status === "open" && old.url) {
+      return sendSuccess(res, { url: old.url }, "Checkout session ready");
     }
+  }
 
-    if (appointment.paymentStatus === "paid") {
-      throw new ApiError(
-        409,
-        "This appointment is already paid"
-      );
-    }
+  const unitAmount = Math.round(appointment.servicePrice * env.BDT_TO_USD_RATE * 100);
+  if (unitAmount < 50) throw new ApiError(400, "This amount is below the minimum card payment");
 
-    // Reuse an existing open checkout session.
-    if (appointment.checkoutSessionId) {
-      const old = await stripe.checkout.sessions
-        .retrieve(appointment.checkoutSessionId)
-        .catch(() => null);
-
-      // Stripe already received the payment.
-      if (old?.payment_status === "paid") {
-        await fulfillCheckoutSession(old);
-
-        throw new ApiError(
-          409,
-          "Your payment was received. This appointment is now marked as paid."
-        );
-      }
-
-      if (old?.status === "open" && old.url) {
-        return sendSuccess(
-          res,
-          { url: old.url },
-          "Checkout session ready"
-        );
-      }
-    }
-
-    // Calculate the payment amount using the database price.
-    const unitAmount = Math.round(
-      appointment.servicePrice *
-      env.BDT_TO_USD_RATE *
-      100
-    );
-
-    if (unitAmount < 50) {
-      throw new ApiError(
-        400,
-        "This amount is below the minimum card payment"
-      );
-    }
-
-    const session = await stripe.checkout.sessions.create({
-      mode: "payment",
-      customer_email: req.user.email,
-      client_reference_id: appointmentId,
-
-      line_items: [
-        {
-          quantity: 1,
-          price_data: {
-            currency: "usd",
-            unit_amount: unitAmount,
-            product_data: {
-              name: appointment.serviceName,
-              description: `${appointment.date} at ${appointment.timeSlot}`,
-            },
+  const session = await stripe.checkout.sessions.create({
+    mode: "payment",
+    customer_email: req.user.email,
+    client_reference_id: appointmentId,
+    line_items: [
+      {
+        quantity: 1,
+        price_data: {
+          currency: "usd",
+          unit_amount: unitAmount,
+          product_data: {
+            name: appointment.serviceName,
+            description: `${appointment.appointmentDate} at ${appointment.timeSlot}`,
           },
         },
-      ],
-
-      metadata: {
-        appointmentId,
-        userId: req.user.id,
       },
+    ],
+    // fulfillCheckoutSession reads these to find the appointment.
+    metadata: { appointmentId, userId: req.user.id },
+    success_url: `${env.CLIENT_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${env.CLIENT_URL}/payment/cancel?appointment_id=${appointmentId}`,
+  });
 
-      success_url: `${env.CLIENT_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+  await appointmentsCollection.updateOne(
+    { _id },
+    { $set: { checkoutSessionId: session.id, updatedAt: new Date() } },
+  );
 
-      cancel_url: `${env.CLIENT_URL}/payment/cancel?appointment_id=${appointmentId}`,
-    });
+  sendSuccess(res, { url: session.url }, "Checkout session created", 201);
+});
 
-    await appointmentsCollection.updateOne(
-      { _id },
-      {
-        $set: {
-          checkoutSessionId: session.id,
-          updatedAt: new Date(),
-        },
-      }
-    );
+// GET /api/payments/session-status?session_id=cs_test_... (owner or admin)
+// The /payment/success page polls this. If Stripe says the session is paid,
+// the payment is saved right here, so nothing depends on the webhook arriving first.
+router.get("/session-status", verifyJWT, validate(sessionStatusQuerySchema, "query"), async (req, res) => {
 
-    return sendSuccess(
-      res,
-      { url: session.url },
-      "Checkout session created",
-      201
-    );
+  const session = await stripe.checkout.sessions.retrieve(req.valid.query.session_id).catch(() => null);
+  if (!session) throw new ApiError(404, "Payment session not found");
+
+  const { appointmentId, userId } = session.metadata ?? {};
+
+
+  if (userId !== req.user.id && req.user.role !== "admin") {
+    throw new ApiError(403, "Forbidden: this payment belongs to another account");
   }
-);
 
-// GET /api/payments/session-status?session_id=cs_test_...
-// Customer or admin can check payment status.
-router.get(
-  "/session-status",
-  verifyJWT,
-  validate(sessionStatusQuerySchema, "query"),
-  async (req, res) => {
-    // Step 1: Verify payment directly with Stripe.
-    const session = await stripe.checkout.sessions
-      .retrieve(req.valid.query.session_id)
-      .catch(() => null);
 
-    if (!session) {
-      throw new ApiError(404, "Payment session not found");
-    }
-
-    const { appointmentId, userId } = session.metadata ?? {};
-
-    // Step 2: Only the payment owner or admin can access it.
-    if (
-      userId !== req.user.id &&
-      req.user.role !== "admin"
-    ) {
-      throw new ApiError(
-        403,
-        "Forbidden: this payment belongs to another account"
-      );
-    }
-
-    // Step 3: Save payment after Stripe confirms payment.
-    if (session.payment_status === "paid") {
-      await fulfillCheckoutSession(session);
-    }
-
-    // Step 4: Fetch saved transaction and appointment status.
-    const [transaction, appointment] = await Promise.all([
-      transactionsCollection.findOne(
-        { stripeSessionId: session.id },
-        {
-          projection: {
-            _id: 1,
-          },
-        }
-      ),
-
-      appointmentId
-        ? appointmentsCollection.findOne(
-            {
-              _id: toObjectId(appointmentId),
-            },
-            {
-              projection: {
-                paymentStatus: 1,
-              },
-            }
-          )
-        : null,
-    ]);
-
-    return sendSuccess(
-      res,
-      {
-        sessionStatus: session.status,
-        paymentStatus: session.payment_status,
-        appointmentId: appointmentId ?? null,
-        amount: (session.amount_total ?? 0) / 100,
-        currency: session.currency,
-        recorded: Boolean(transaction),
-        appointmentPaymentStatus:
-          appointment?.paymentStatus ?? "unpaid",
-      },
-      "Session status fetched"
-    );
+  if (session.payment_status === "paid") {
+    await fulfillCheckoutSession(session);
   }
-);
 
-// GET /api/payments/transactions
-// Admin only: fetch payment transactions.
-router.get(
-  "/transactions",
-  verifyJWT,
-  requireRole("admin"),
-  validate(transactionsQuerySchema, "query"),
-  async (req, res) => {
-    const { status, page, limit } = req.valid.query;
+  const [transaction, appointment] = await Promise.all([
+    transactionsCollection.findOne({ stripeSessionId: session.id }, { projection: { _id: 1 } }),
+    appointmentId
+      ? appointmentsCollection.findOne({ _id: toObjectId(appointmentId) }, { projection: { paymentStatus: 1 } })
+      : null,
+  ]);
 
-    const filter = status ? { status } : {};
+  sendSuccess(
+    res,
+    {
+      sessionStatus: session.status,
+      paymentStatus: session.payment_status,
+      appointmentId: appointmentId ?? null,
+      amount: (session.amount_total ?? 0) / 100,
+      currency: session.currency,
+      recorded: Boolean(transaction), // the transaction is saved
+      appointmentPaymentStatus: appointment?.paymentStatus ?? "unpaid", // and the appointment is marked paid
+    },
+    "Session status fetched",
+  );
+});
 
-    const [items, total] = await Promise.all([
-      transactionsCollection
-        .find(filter)
-        .sort({ createdAt: -1 })
-        .skip(getSkip(page, limit))
-        .limit(limit)
-        .toArray(),
+// GET /api/payments/transactions (admin, read-only): ?status=&page=&limit=
+router.get("/transactions", verifyJWT, requireRole("admin"), validate(transactionsQuerySchema, "query"), async (req, res) => {
+  const { status, page, limit } = req.valid.query;
+  const filter = status ? { status } : {};
 
-      transactionsCollection.countDocuments(filter),
-    ]);
+  const [items, total] = await Promise.all([
+    transactionsCollection.find(filter).sort({ createdAt: -1 }).skip(getSkip(page, limit)).limit(limit).toArray(),
+    transactionsCollection.countDocuments(filter),
+  ]);
 
-    return sendSuccess(
-      res,
-      items,
-      "Transactions fetched successfully",
-      200,
-      buildMeta(page, limit, total)
-    );
-  }
-);
+  sendSuccess(res, items, "Transactions fetched successfully", 200, buildMeta(page, limit, total));
+});
 
 export default router;
 

@@ -1,6 +1,5 @@
 // Saves the transaction and marks the appointment as paid.
 // Called ONLY by the verified Stripe webhook (webhook.js) and the recover script.
-// Safe to run many times for the same session.
 
 import { ObjectId } from "mongodb";
 import { appointmentsCollection, transactionsCollection } from "../../config/db.js";
@@ -21,7 +20,7 @@ export async function fulfillCheckoutSession(session) {
   const appointment = await appointmentsCollection.findOne({ _id });
 
   // The appointment must exist and belong to the customer who started the checkout.
-  if (!appointment || appointment.userId !== userId) {
+  if (!appointment || appointment.customerId !== userId) {
     console.log("Stripe: appointment not found for this session", session.id);
     return false;
   }
@@ -36,12 +35,12 @@ export async function fulfillCheckoutSession(session) {
         $setOnInsert: {
           paymentIntentId: session.payment_intent ?? null,
           appointmentId: _id,
-          userId: appointment.userId,
+          customerId: appointment.customerId,
           customerName: appointment.userName,
           customerEmail: appointment.userEmail,
           serviceId: appointment.serviceId,
           serviceName: appointment.serviceName,
-          appointmentDate: appointment.date,
+          appointmentDate: appointment.appointmentDate,
           appointmentTime: appointment.timeSlot,
           amount: (session.amount_total ?? 0) / 100,
           currency: session.currency,

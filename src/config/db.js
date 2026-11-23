@@ -16,18 +16,41 @@ const createIndex = (collection, keys, options) =>
     console.warn(`Index "${options.name}" was not created: ${error.message}`);
   });
 
+
+async function dropOldSlotIndex() {
+  const indexes = await appointmentsCollection.indexes().catch(() => []);
+  const old = indexes.find((index) => index.name === "unique_locked_slot" && index.key.date);
+
+  if (old) await appointmentsCollection.dropIndex("unique_locked_slot");
+}
+
+
+async function renameOldFields() {
+  await Promise.all([
+    servicesCollection.updateMany({ name: { $exists: true } }, { $rename: { name: "serviceName" } }),
+    appointmentsCollection.updateMany(
+      { userId: { $exists: true } },
+      { $rename: { userId: "customerId", date: "appointmentDate", notes: "message" } },
+    ),
+    transactionsCollection.updateMany({ userId: { $exists: true } }, { $rename: { userId: "customerId" } }),
+  ]);
+}
+
 export async function connectDB() {
   await client.connect();
   await db.command({ ping: 1 });
+
+  await dropOldSlotIndex();
+  await renameOldFields();
 
   await Promise.all([
     // One transaction per Stripe session.
     createIndex(transactionsCollection, { stripeSessionId: 1 }, { unique: true, name: "unique_stripe_session" }),
 
-    // One live appointment per service, date and time slot (slotLocked is removed on cancel).
+
     createIndex(
       appointmentsCollection,
-      { serviceId: 1, date: 1, timeSlot: 1 },
+      { serviceId: 1, appointmentDate: 1, timeSlot: 1 },
       { unique: true, name: "unique_locked_slot", partialFilterExpression: { slotLocked: true } },
     ),
   ]);

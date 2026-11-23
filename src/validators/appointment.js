@@ -28,9 +28,9 @@ const timeSlot = z
 
 export const createAppointmentSchema = z.strictObject({
   serviceId: objectIdString,
-  date,
+  appointmentDate: date,
   timeSlot,
-  notes: z.string().trim().max(300).optional(),
+  message: z.string().trim().max(300).optional(),
 });
 
 const status = z
